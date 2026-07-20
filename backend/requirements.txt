@@ -1,0 +1,11 @@
+tensorflow
+numpy
+Pillow
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+motor
+requests
+python-dotenv
+google-generativeai
