@@ -8,7 +8,7 @@ import sys
 import json
 from pathlib import Path
 import os
-import google.generativeai as genai
+from google import genai
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.plant_validator import plant_validator
@@ -16,7 +16,7 @@ from models.disease_classifier import DISEASE_CLASSES
 
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+# Configure client inside the function where it is used or create a global client
 
 class MultimodalDiseaseModel:
     def __init__(self, model_path=None):
@@ -28,7 +28,7 @@ class MultimodalDiseaseModel:
     def _load_model(self):
         if Path(self.model_path).exists():
             logger.info(f"Loading multimodal model from {self.model_path}")
-            self.model = keras.models.load_model(self.model_path)
+            self.model = keras.models.load_model(self.model_path, compile=False)
         else:
             logger.warning(f"Multimodal model file not found at {self.model_path}.")
 
@@ -45,7 +45,7 @@ class MultimodalDiseaseModel:
             if not os.environ.get("GEMINI_API_KEY"):
                  return {"is_valid_plant": True, "predicted_class": "Model Missing", "confidence": 0.0, "message": "Multimodal model not loaded and GEMINI_API_KEY missing"}
 
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
             
             image_bytes.seek(0)
             img = Image.open(image_bytes).convert('RGB')
@@ -62,7 +62,10 @@ class MultimodalDiseaseModel:
             Make sure 'predicted_class' is exactly one of the provided categories.
             """
             
-            response = model.generate_content([prompt, img])
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=[prompt, img]
+            )
             response_text = response.text.strip()
             
             if response_text.startswith("```json"):

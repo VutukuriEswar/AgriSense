@@ -16,7 +16,7 @@ class PlantValidator:
         self.model = None
         if model_path.exists():
             try:
-                self.model = keras.models.load_model(model_path)
+                self.model = keras.models.load_model(model_path, compile=False)
                 logger.info("Plant Validator model loaded successfully.")
             except Exception as e:
                 logger.error(f"Failed to load plant validator: {e}")

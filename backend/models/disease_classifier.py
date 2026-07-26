@@ -31,7 +31,7 @@ class DiseaseClassifier:
     def _load_or_create_model(self):
         if Path(self.model_path).exists():
             logger.info(f"Loading disease classifier model from {self.model_path}")
-            self.model = keras.models.load_model(self.model_path)
+            self.model = keras.models.load_model(self.model_path, compile=False)
         else:
             logger.warning(f"Model file not found at {self.model_path}. Predictions will fail.")
 

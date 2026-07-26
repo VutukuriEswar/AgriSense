@@ -9,6 +9,7 @@ import math
 import requests
 import asyncio
 import sys
+import io
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -247,6 +248,5 @@ async def analyze_multimodal(lat: float = Form(...), lon: float = Form(...), fil
             "radius_km": radius_km
         }
     except Exception as e:
-        import io
         logger.error(f"Multimodal analysis error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
