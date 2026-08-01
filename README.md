@@ -136,4 +136,6 @@ This project is licensed under the **MIT License** — see the [LICENSE](./LICEN
 
 ## Acknowledgments
 
+This project was developed under the guidance of **Mr. Ch. Srihari**, **VIT-AP University**. We sincerely thank our professor for their invaluable guidance, mentorship, and continuous support throughout the development of this project.
+
 Thanks to Google for accessible Gemini APIs, OpenWeather for providing seamless weather data APIs, MongoDB for storing data, Kaggle for allowing us train the models required for the project, and the creators of TensorFlow/Keras for empowering the core prediction engines.
