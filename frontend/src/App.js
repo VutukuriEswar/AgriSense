@@ -4,8 +4,7 @@ import '@/App.css';
 import 'leaflet/dist/leaflet.css';
 import Dashboard from '@/pages/Dashboard';
 import DiseaseDetection from '@/pages/DiseaseDetection';
-import FarmlandManager from '@/pages/FarmlandManager';
-import { Leaf, Bug, MapPin, BarChart3 } from 'lucide-react';
+import { Leaf, Bug, BarChart3 } from 'lucide-react';
 import { Toaster } from '@/components/ui/sonner';
 
 function App() {
@@ -30,7 +29,6 @@ function App() {
             <nav className="hidden md:flex items-center gap-2">
               <NavLink to="/" icon={BarChart3} label="Dashboard" active={activeNav === 'dashboard'} onClick={() => setActiveNav('dashboard')} />
               <NavLink to="/disease" icon={Bug} label="Disease AI" active={activeNav === 'disease'} onClick={() => setActiveNav('disease')} />
-              <NavLink to="/farmland" icon={MapPin} label="Location Intel" active={activeNav === 'farmland'} onClick={() => setActiveNav('farmland')} />
             </nav>
           </div>
         </header>
@@ -39,7 +37,6 @@ function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/disease" element={<DiseaseDetection />} />
-            <Route path="/farmland" element={<FarmlandManager />} />
           </Routes>
         </main>
 
