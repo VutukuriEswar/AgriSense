@@ -110,6 +110,6 @@ This project is licensed under the **MIT License** — see the [LICENSE](./LICEN
 
 ## Acknowledgments
 
-This project was developed under the guidance of **Mr. Ch. Srihari**, **VIT-AP University**. We sincerely thank our professor for their invaluable guidance, mentorship, and continuous support throughout the development of this project.
+This project was developed under the guidance of **Mr. Chengalva Srihari**, **VIT-AP University**. We sincerely thank our professor for their invaluable guidance, mentorship, and continuous support throughout the development of this project.
 
 Thanks to MongoDB for storing data, Kaggle for allowing us to train the models required for the project, and the creators of PyTorch and TensorFlow/Keras for empowering the core prediction and explainability engines.
