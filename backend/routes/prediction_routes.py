@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models.disease_classifier import disease_classifier
+from models.explainable_pytorch_model import explainable_classifier
 from models.risk_predictor import risk_predictor
 from services.weather_service import weather_service
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -29,6 +29,7 @@ class DiseaseResult(BaseModel):
     predicted_class: Optional[str] = None
     confidence: Optional[float] = None
     all_probabilities: List[dict] = []
+    explanations: Optional[dict] = None
 
 @router.post("/disease", response_model=DiseaseResult)
 async def predict_disease(file: UploadFile = File(...)):
@@ -39,7 +40,7 @@ async def predict_disease(file: UploadFile = File(...)):
         contents = await file.read()
         image_bytes = io.BytesIO(contents)
         
-        prediction = disease_classifier.predict(image_bytes)
+        prediction = explainable_classifier.predict(image_bytes)
         
         await db.disease_predictions.insert_one({
             **prediction,

@@ -9,3 +9,12 @@ motor
 requests
 python-dotenv
 google-genai
+torch
+torchvision
+grad-cam
+lime
+shap
+scikit-image
+matplotlib
+opencv-python-headless
+albumentations

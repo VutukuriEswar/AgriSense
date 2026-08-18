@@ -12,11 +12,9 @@ from google import genai
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.plant_validator import plant_validator
-from models.disease_classifier import DISEASE_CLASSES
+from models.explainable_pytorch_model import DISEASE_CLASSES
 
 logger = logging.getLogger(__name__)
-
-# Configure client inside the function where it is used or create a global client
 
 class MultimodalDiseaseModel:
     def __init__(self, model_path=None):

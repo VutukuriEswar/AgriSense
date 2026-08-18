@@ -61,6 +61,7 @@ agenthub/agents/youtube/db
 *.dylib
 
 .cache/
+lime_shap_gradcam.pth
 disease_classifier.h5
 multimodal_disease.h5
 plant_validator.h5

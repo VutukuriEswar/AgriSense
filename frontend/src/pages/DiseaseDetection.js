@@ -152,6 +152,73 @@ const DiseaseDetection = () => {
           )}
         </div>
       </div>
+
+      {result && result.is_valid_plant && result.explanations && (
+        <div className="mt-8">
+          <h2 className="text-2xl font-bold text-green-900 mb-6">AI Explainability (XAI)</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+            
+            <Card className="border-gray-200 shadow-sm">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-md text-gray-800">Original Scan</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <img src={`data:image/png;base64,${result.explanations.original}`} alt="Original" className="w-full rounded-lg object-contain bg-gray-50 border" />
+                <p className="text-sm text-gray-500 mt-3">The cropped and normalized image fed to the AI model.</p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-gray-200 shadow-sm">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-md text-gray-800">Grad-CAM (Attention)</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {result.explanations.gradcam ? (
+                  <>
+                    <img src={`data:image/png;base64,${result.explanations.gradcam}`} alt="Grad-CAM" className="w-full rounded-lg object-contain bg-gray-50 border" />
+                    <p className="text-sm text-gray-500 mt-3">Red areas highlight exactly where the model looked to make its prediction.</p>
+                  </>
+                ) : (
+                   <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="border-gray-200 shadow-sm">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-md text-gray-800">LIME (Superpixels)</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {result.explanations.lime ? (
+                  <>
+                    <img src={`data:image/png;base64,${result.explanations.lime}`} alt="LIME" className="w-full rounded-lg object-contain bg-gray-50 border" />
+                    <p className="text-sm text-gray-500 mt-3">Highlights the image regions (superpixels) that most strongly supported the prediction.</p>
+                  </>
+                ) : (
+                   <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="border-gray-200 shadow-sm">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-md text-gray-800">SHAP (Feature Impact)</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {result.explanations.shap ? (
+                  <>
+                    <img src={`data:image/png;base64,${result.explanations.shap}`} alt="SHAP" className="w-full rounded-lg object-contain bg-gray-50 border" />
+                    <p className="text-sm text-gray-500 mt-3">Red pixels push the model towards the disease diagnosis; blue pushes it away.</p>
+                  </>
+                ) : (
+                   <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
+                )}
+              </CardContent>
+            </Card>
+
+          </div>
+        </div>
+      )}
     </div>
   );
 };
