@@ -14,7 +14,6 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import numpy as np
 from PIL import Image
-from tensorflow import keras
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -58,27 +57,59 @@ async def shutdown_db_client():
 
 class PlantValidator:
     def __init__(self):
-        model_path = ROOT_DIR / 'saved_models' / 'plant_validator.h5'
-        self.model = None
-        if model_path.exists():
+        tflite_path = ROOT_DIR / 'saved_models' / 'plant_validator.tflite'
+        h5_path = ROOT_DIR / 'saved_models' / 'plant_validator.h5'
+        
+        self.interpreter = None
+        self.input_details = None
+        self.output_details = None
+        
+        if not tflite_path.exists() and h5_path.exists():
+            logger.info("TFLite model not found. Attempting to convert .h5 model...")
             try:
-                self.model = keras.models.load_model(model_path, compile=False)
-                logger.info("Plant Validator model loaded successfully.")
+                import tensorflow as tf
+                model = tf.keras.models.load_model(str(h5_path), compile=False)
+                converter = tf.lite.TFLiteConverter.from_keras_model(model)
+                converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                tflite_model = converter.convert()
+                with open(str(tflite_path), 'wb') as f:
+                    f.write(tflite_model)
+                logger.info(f"Successfully converted and saved {tflite_path}")
+            except ImportError:
+                logger.error("TensorFlow is not installed. Cannot auto-convert .h5 to .tflite!")
             except Exception as e:
-                logger.error(f"Failed to load plant validator: {e}")
+                logger.error(f"Error during conversion: {e}")
+
+        if tflite_path.exists():
+            try:
+                try:
+                    import tflite_runtime.interpreter as tflite
+                except ImportError:
+                    from tensorflow import lite as tflite
+                
+                self.interpreter = tflite.Interpreter(model_path=str(tflite_path))
+                self.interpreter.allocate_tensors()
+                self.input_details = self.interpreter.get_input_details()
+                self.output_details = self.interpreter.get_output_details()
+                logger.info("Plant Validator TFLite model loaded successfully.")
+            except Exception as e:
+                logger.error(f"Failed to load plant validator TFLite: {e}")
         else:
-            logger.warning("plant_validator.h5 not found. Validator will accept all images.")
+            logger.warning("plant_validator.tflite not found (and could not be converted). Validator will accept all images.")
 
     def is_plant(self, image_bytes):
-        if not self.model:
+        if not self.interpreter:
             return True, "Model not loaded, skipping validation."
 
         try:
             img = Image.open(image_bytes).convert('RGB')
             img = img.resize((224, 224))
-            img_arr = np.array(img) / 255.0
+            img_arr = np.array(img, dtype=np.float32) / 255.0
             img_arr = np.expand_dims(img_arr, axis=0)
-            prediction = self.model.predict(img_arr, verbose=0)[0][0]
+            
+            self.interpreter.set_tensor(self.input_details[0]['index'], img_arr)
+            self.interpreter.invoke()
+            prediction = self.interpreter.get_tensor(self.output_details[0]['index'])[0][0]
             
             if prediction > 0.5:
                 return True, "Valid plant image detected."

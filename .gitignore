@@ -62,9 +62,10 @@ agenthub/agents/youtube/db
 
 .cache/
 lime_shap_gradcam.pth
-disease_classifier.h5
 multimodal_disease.h5
 plant_validator.h5
+multimodal_disease.tflite
+plant_validator.tflite
 
 android-sdk/ 
 chroma_db/

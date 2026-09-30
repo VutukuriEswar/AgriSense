@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Upload, Bug, AlertTriangle, Loader2 } from 'lucide-react';
+import { Upload, Bug, AlertTriangle, Loader2, Camera, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
@@ -14,6 +14,55 @@ const DiseaseDetection = () => {
   const [preview, setPreview] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [useCamera, setUseCamera] = useState(false);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    return () => stopCamera();
+  }, []);
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      setUseCamera(true);
+      setPreview(null);
+      setImage(null);
+      setResult(null);
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 100);
+    } catch (err) {
+      toast.error("Unable to access camera. Please check permissions.");
+      console.error(err);
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
+    }
+    setUseCamera(false);
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current && canvasRef.current) {
+      const context = canvasRef.current.getContext('2d');
+      canvasRef.current.width = videoRef.current.videoWidth;
+      canvasRef.current.height = videoRef.current.videoHeight;
+      context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+      
+      canvasRef.current.toBlob((blob) => {
+        const file = new File([blob], "capture.jpg", { type: "image/jpeg" });
+        setImage(file);
+        setPreview(URL.createObjectURL(file));
+        stopCamera();
+      }, 'image/jpeg');
+    }
+  };
 
   const handleImageChange = (e) => {
     const file = e.target.files[0];
@@ -79,18 +128,55 @@ const DiseaseDetection = () => {
             <CardTitle className="text-green-900">Upload Sample</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="border-2 border-dashed border-green-200 rounded-lg p-8 text-center hover:border-green-400 transition cursor-pointer relative min-h-[300px] flex items-center justify-center">
-              <input type="file" accept="image/*" onChange={handleImageChange} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-              {preview ? (
-                <img src={preview} alt="Preview" className="max-h-64 mx-auto rounded-lg object-contain shadow-md" />
-              ) : (
-                <div className="text-green-600">
-                  <Upload className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                  <p className="font-medium">Click or drag image to upload</p>
-                  <p className="text-sm text-gray-400 mt-1">JPG, PNG up to 10MB</p>
+            {!useCamera ? (
+              <div className="border-2 border-dashed border-green-200 rounded-lg p-8 text-center hover:border-green-400 transition relative min-h-[300px] flex flex-col items-center justify-center">
+                
+                {preview ? (
+                  <div className="relative w-full">
+                    <img src={preview} alt="Preview" className="max-h-64 mx-auto rounded-lg object-contain shadow-md mb-4" />
+                    <Button variant="outline" size="sm" onClick={() => { setPreview(null); setImage(null); }} className="absolute -top-4 -right-4 rounded-full h-8 w-8 p-0 bg-white hover:bg-gray-100 text-red-500 shadow-md">
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="relative w-full h-full flex flex-col items-center justify-center cursor-pointer">
+                    <input type="file" accept="image/*" onChange={handleImageChange} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
+                    <div className="text-green-600">
+                      <Upload className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                      <p className="font-medium">Click or drag image to upload</p>
+                      <p className="text-sm text-gray-400 mt-1">JPG, PNG up to 10MB</p>
+                    </div>
+                  </div>
+                )}
+                
+                {!preview && (
+                  <>
+                    <div className="flex items-center w-full my-4 z-20">
+                      <div className="flex-1 border-t border-gray-200"></div>
+                      <span className="px-3 text-gray-400 text-sm">OR</span>
+                      <div className="flex-1 border-t border-gray-200"></div>
+                    </div>
+                    <Button onClick={startCamera} type="button" variant="outline" className="w-full border-green-300 text-green-700 hover:bg-green-50 z-20">
+                      <Camera className="w-4 h-4 mr-2" /> Use Camera
+                    </Button>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="border-2 border-solid border-green-300 rounded-lg p-0 text-center bg-black relative min-h-[300px] flex flex-col items-center justify-center overflow-hidden">
+                <video ref={videoRef} autoPlay playsInline className="w-full h-full max-h-[350px] object-cover" />
+                <canvas ref={canvasRef} className="hidden" />
+                
+                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 px-4">
+                  <Button onClick={stopCamera} variant="destructive" size="sm" className="rounded-full shadow-lg border border-white/20">
+                    Cancel
+                  </Button>
+                  <Button onClick={capturePhoto} className="bg-white text-green-700 hover:bg-gray-100 font-bold rounded-full shadow-lg px-6 border border-white/20">
+                    <Camera className="w-4 h-4 mr-2" /> Capture
+                  </Button>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             <Button onClick={analyzeImage} disabled={loading || !image} className="w-full mt-6 bg-green-600 hover:bg-green-700 h-11">
               {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Analyzing...</> : <><Bug className="w-4 h-4 mr-2" /> Detect Disease</>}
