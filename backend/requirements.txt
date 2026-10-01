@@ -1,4 +1,4 @@
-tflite-runtime
+# Core
 numpy
 Pillow
 fastapi
@@ -8,13 +8,18 @@ pydantic
 motor
 requests
 python-dotenv
-google-genai
-torch
-torchvision
-grad-cam
-lime
-shap
-scikit-image
 matplotlib
-opencv-python-headless
-albumentations
+
+# AI - Inference (works on Raspberry Pi)
+tflite-runtime; platform_machine == "armv7l" or platform_machine == "aarch64"
+
+# AI - Full XAI (only installs on non-Pi / when torch is available)
+torch; platform_machine != "armv7l"
+torchvision; platform_machine != "armv7l"
+grad-cam; platform_machine != "armv7l"
+lime; platform_machine != "armv7l"
+shap; platform_machine != "armv7l"
+scikit-image; platform_machine != "armv7l"
+opencv-python-headless; platform_machine != "armv7l"
+albumentations; platform_machine != "armv7l"
+google-genai; platform_machine != "armv7l"
