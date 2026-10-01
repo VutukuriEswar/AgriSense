@@ -284,7 +284,6 @@ class ExplainableDiseaseClassifier:
                 self.lime_explainer = lime_image.LimeImageExplainer()
                 logger.info("PyTorch model also loaded — XAI features active.")
 
-                global DISEASE_CLASSES
                 if num_classes != len(DISEASE_CLASSES):
                     DISEASE_CLASSES = [f"Class_{i}" for i in range(num_classes)]
             except Exception as e:
