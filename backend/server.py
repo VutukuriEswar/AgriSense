@@ -48,7 +48,10 @@ def _load_tflite_interpreter(model_path: Path):
     try:
         import tflite_runtime.interpreter as tflite
     except ImportError:
-        from tensorflow import lite as tflite
+        try:
+            import ai_edge_litert.interpreter as tflite
+        except ImportError:
+            from tensorflow import lite as tflite
     interp = tflite.Interpreter(model_path=str(model_path))
     interp.allocate_tensors()
     return interp, interp.get_input_details(), interp.get_output_details()
