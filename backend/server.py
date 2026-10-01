@@ -139,7 +139,8 @@ class PlantValidator:
                 self.output_details = self.interpreter.get_output_details()
                 logger.info("PlantValidator loaded (TFLite).")
             except Exception as e:
-                logger.error(f"Failed to load plant_validator.tflite: {e}")
+                logger.error(f"Failed to load plant_validator.tflite (likely unsupported op version on Pi). It will be disabled. Error: {e}")
+                self.interpreter = None
         else:
             logger.warning("No plant validator model found — all images will be accepted.")
 
@@ -205,32 +206,7 @@ def _convert_pth_to_tflite(pth_path: Path, onnx_path: Path, tflite_path: Path):
             logger.error(f"pth->onnx failed: {e}")
             return None
 
-    # Step 2: onnx -> tflite
-    if onnx_path.exists() and not tflite_path.exists():
-        logger.info("Converting .onnx -> .tflite ...")
-        try:
-            import tempfile, shutil, glob
-            import onnx2tf
-            with tempfile.TemporaryDirectory() as tmp:
-                onnx2tf.convert(
-                    input_onnx_file_path=str(onnx_path),
-                    output_folder_path=tmp,
-                    non_verbose=True,
-                )
-                files = glob.glob(tmp + '/*float32*.tflite') or glob.glob(tmp + '/*.tflite')
-                if files:
-                    shutil.copy(files[0], str(tflite_path))
-                    logger.info(f"onnx -> tflite done: {tflite_path.name}")
-                else:
-                    logger.error("onnx2tf produced no .tflite file!")
-                    return None
-        except ImportError:
-            logger.error("onnx2tf not installed — cannot convert .onnx to .tflite!")
-            return None
-        except Exception as e:
-            logger.error(f"onnx->tflite failed: {e}")
-            return None
-
+    # We no longer convert to TFLite. We will use OpenCV DNN with the ONNX file.
     return num_classes
 
 
@@ -241,15 +217,13 @@ class ExplainableDiseaseClassifier:
         onnx_path   = ROOT_DIR / 'saved_models' / 'lime_shap_gradcam.onnx'
         tflite_path = ROOT_DIR / 'saved_models' / 'lime_shap_gradcam.tflite'
 
-        self.tflite_interpreter = None
-        self.tflite_input_details  = None
-        self.tflite_output_details = None
+        self.opencv_net   = None
         self.torch_model  = None
         self.cam          = None
         self.lime_explainer = None
 
-        # Auto-convert pth -> onnx -> tflite if tflite missing
-        if not tflite_path.exists() and pth_path.exists():
+        # Auto-convert pth -> onnx if onnx missing
+        if not onnx_path.exists() and pth_path.exists():
             if TORCH_AVAILABLE:
                 num_cls = _convert_pth_to_tflite(pth_path, onnx_path, tflite_path)
                 if num_cls and num_cls != len(DISEASE_CLASSES):
@@ -257,14 +231,14 @@ class ExplainableDiseaseClassifier:
             else:
                 logger.error("torch not available — cannot auto-convert .pth!")
 
-        # Load TFLite interpreter for lightweight inference (Pi + laptop)
-        if tflite_path.exists():
+        # Load ONNX model using OpenCV DNN (works flawlessly on Pi!)
+        if onnx_path.exists():
             try:
-                self.tflite_interpreter, self.tflite_input_details, self.tflite_output_details = \
-                    _load_tflite_interpreter(tflite_path)
-                logger.info("Disease classifier loaded (TFLite).")
+                import cv2
+                self.opencv_net = cv2.dnn.readNetFromONNX(str(onnx_path))
+                logger.info("Disease classifier loaded (OpenCV DNN).")
             except Exception as e:
-                logger.error(f"Failed to load disease TFLite model: {e}")
+                logger.error(f"Failed to load disease ONNX model via OpenCV: {e}")
 
         if pth_path.exists() and TORCH_AVAILABLE:
             try:
@@ -300,11 +274,10 @@ class ExplainableDiseaseClassifier:
         ])
         return transform(pil_img)
 
-    def _predict_probs_tflite(self, pil_img):
+    def _predict_probs_opencv(self, pil_img):
         arr = preprocess_image_numpy(pil_img)
-        self.tflite_interpreter.set_tensor(self.tflite_input_details[0]['index'], arr)
-        self.tflite_interpreter.invoke()
-        raw = self.tflite_interpreter.get_tensor(self.tflite_output_details[0]['index'])[0]
+        self.opencv_net.setInput(arr)
+        raw = self.opencv_net.forward()[0]
         exp = np.exp(raw - raw.max())
         return exp / exp.sum()
 
@@ -383,13 +356,13 @@ class ExplainableDiseaseClassifier:
                     "explanations": None
                 }
 
-            if not self.tflite_interpreter and not self.torch_model:
+            if not self.opencv_net and not self.torch_model:
                 raise Exception("No disease classifier model is loaded.")
 
             pil_img = Image.open(image_bytes).convert('RGB')
 
-            if self.tflite_interpreter:
-                probs = self._predict_probs_tflite(pil_img)
+            if self.opencv_net:
+                probs = self._predict_probs_opencv(pil_img)
             else:
                 probs = self._predict_probs_torch(pil_img)
 
