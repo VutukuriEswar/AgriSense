@@ -64,7 +64,6 @@ agenthub/agents/youtube/db
 lime_shap_gradcam.pth
 multimodal_disease.h5
 plant_validator.h5
-lime_shap_gradcam.onnx
 lime_shap_gradcam.tflite
 multimodal_disease.tflite
 plant_validator.tflite
