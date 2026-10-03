@@ -10,6 +10,9 @@ motor
 requests
 python-dotenv
 matplotlib
+lime
+shap
+scikit-image
 
 # AI - Inference (works on Raspberry Pi - both 32-bit armv7l and 64-bit aarch64)
 tflite-runtime; platform_machine == "armv7l" or platform_machine == "aarch64"
@@ -20,8 +23,5 @@ torchvision; platform_machine == "x86_64" or platform_machine == "AMD64"
 onnx; platform_machine == "x86_64" or platform_machine == "AMD64"
 onnx2tf; platform_machine == "x86_64" or platform_machine == "AMD64"
 grad-cam; platform_machine == "x86_64" or platform_machine == "AMD64"
-lime; platform_machine == "x86_64" or platform_machine == "AMD64"
-shap; platform_machine == "x86_64" or platform_machine == "AMD64"
-scikit-image; platform_machine == "x86_64" or platform_machine == "AMD64"
 albumentations; platform_machine == "x86_64" or platform_machine == "AMD64"
 google-genai; platform_machine == "x86_64" or platform_machine == "AMD64"

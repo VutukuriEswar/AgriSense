@@ -398,6 +398,14 @@ class ExplainableDiseaseClassifier:
         with torch.no_grad():
             return F.softmax(self.torch_model(batch), dim=1).cpu().numpy()
 
+    def _predict_fn_lime_tflite(self, images_np):
+        """Fallback for LIME/SHAP on Pi using TFLite loop."""
+        results = []
+        for img_np in images_np:
+            pil_img = Image.fromarray(img_np.astype(np.uint8))
+            results.append(self._predict_probs_tflite(pil_img))
+        return np.array(results)
+
     def _denormalize(self, tensor_img):
         img = tensor_img.cpu().numpy().transpose(1, 2, 0)
         img = img * np.array(IMAGENET_STD) + np.array(IMAGENET_MEAN)
@@ -405,31 +413,56 @@ class ExplainableDiseaseClassifier:
 
     def _generate_xai(self, pil_img, pred_idx):
         raw_uint8 = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE)))
-        input_t   = self._torch_transform(pil_img).unsqueeze(0).to(self.DEVICE)
         result = {"gradcam": None, "lime": None, "shap": None}
-        try:
-            with torch.enable_grad():
-                gc = self.cam(input_tensor=input_t, targets=[ClassifierOutputTarget(pred_idx)])[0]
-            cam_vis = show_cam_on_image(self._denormalize(input_t.squeeze(0)), gc, use_rgb=True)
-            result["gradcam"] = image_to_base64(cam_vis / 255.0)
-        except Exception as e:
-            logger.error(f"GradCAM error: {e}")
+        
+        # Determine which prediction function to use based on PyTorch availability
+        use_torch = self.torch_model is not None
+        predict_fn = self._predict_fn_lime if use_torch else self._predict_fn_lime_tflite
 
+        # 1. Grad-CAM (Requires PyTorch gradients - impossible on TFLite)
+        if use_torch:
+            try:
+                input_t = self._torch_transform(pil_img).unsqueeze(0).to(self.DEVICE)
+                with torch.enable_grad():
+                    gc = self.cam(input_tensor=input_t, targets=[ClassifierOutputTarget(pred_idx)])[0]
+                cam_vis = show_cam_on_image(self._denormalize(input_t.squeeze(0)), gc, use_rgb=True)
+                result["gradcam"] = image_to_base64(cam_vis / 255.0)
+            except Exception as e:
+                logger.error(f"GradCAM error: {e}")
+
+        # 2. LIME (Model agnostic - works on both)
         try:
-            exp = self.lime_explainer.explain_instance(
-                raw_uint8, self._predict_fn_lime,
+            # We import locally so Pi doesn't crash if it's missing the package
+            from lime import lime_image
+            from skimage.segmentation import mark_boundaries
+            
+            # Use smaller num_samples on TFLite to prevent Pi from timing out (100 vs 200)
+            samples = 200 if use_torch else 100
+            
+            explainer = lime_image.LimeImageExplainer()
+            exp = explainer.explain_instance(
+                raw_uint8, predict_fn,
                 labels=(pred_idx,), top_labels=None,
-                hide_color=0, num_samples=200
+                hide_color=0, num_samples=samples
             )
             lt, lm = exp.get_image_and_mask(pred_idx, positive_only=True, num_features=6, hide_rest=False)
             result["lime"] = image_to_base64(mark_boundaries(lt / 255.0, lm))
+        except ImportError:
+            logger.warning("LIME skipped: 'lime' or 'skimage' not installed.")
         except Exception as e:
             logger.error(f"LIME error: {e}")
 
+        # 3. SHAP (Model agnostic - works on both)
         try:
+            import shap
+            
+            # Use small evals and batch=1 on TFLite to avoid Pi freezing
+            evals = 100 if use_torch else 50
+            batch = 10 if use_torch else 1
+            
             masker = shap.maskers.Image("blur(64,64)", (IMG_SIZE, IMG_SIZE, 3))
-            explainer = shap.Explainer(self._predict_fn_lime, masker, output_names=DISEASE_CLASSES)
-            sv = explainer(np.expand_dims(raw_uint8, 0), max_evals=100, batch_size=10, outputs=[pred_idx])
+            explainer = shap.Explainer(predict_fn, masker, output_names=DISEASE_CLASSES)
+            sv = explainer(np.expand_dims(raw_uint8, 0), max_evals=evals, batch_size=batch, outputs=[pred_idx])
             arr = sv.values[0]
             if arr.ndim == 4:
                 arr = arr[..., 0]
@@ -440,6 +473,8 @@ class ExplainableDiseaseClassifier:
             ax.imshow(hm, cmap="bwr", alpha=0.6, vmin=-amax, vmax=amax)
             ax.axis("off")
             result["shap"] = fig_to_base64(fig)
+        except ImportError:
+            logger.warning("SHAP skipped: 'shap' not installed.")
         except Exception as e:
             logger.error(f"SHAP error: {e}")
 
@@ -480,11 +515,11 @@ class ExplainableDiseaseClassifier:
             )
 
             if self.torch_model:
-                explanations = self._generate_xai(pil_img, class_idx)
-                xai_msg = "Analysis complete with Explanations"
+                xai_msg = "Analysis complete with Explanations (Fast PyTorch)"
             else:
-                explanations = {"gradcam": None, "lime": None, "shap": None}
-                xai_msg = "Analysis complete (XAI unavailable — PyTorch not installed)"
+                xai_msg = "Analysis complete with Explanations (Slow TFLite mode, Grad-CAM unavailable)"
+            
+            explanations = self._generate_xai(pil_img, class_idx)
 
             raw_resized = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE)))
             explanations["original"] = image_to_base64(raw_resized / 255.0)
