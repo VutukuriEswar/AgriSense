@@ -1,5 +1,6 @@
 # Core
-numpy
+numpy>=1.23.2,<2
+opencv-python-headless==4.8.1.78
 Pillow
 fastapi
 uvicorn[standard]
@@ -10,16 +11,15 @@ requests
 python-dotenv
 matplotlib
 
-# AI - Inference (works on Raspberry Pi)
+# AI - Inference (works on Raspberry Pi - both 32-bit armv7l and 64-bit aarch64)
 tflite-runtime; platform_machine == "armv7l" or platform_machine == "aarch64"
 
-# AI - Full XAI (only installs on non-Pi / when torch is available)
-torch; platform_machine != "armv7l"
-torchvision; platform_machine != "armv7l"
-grad-cam; platform_machine != "armv7l"
-lime; platform_machine != "armv7l"
-shap; platform_machine != "armv7l"
-scikit-image; platform_machine != "armv7l"
-opencv-python-headless; platform_machine != "armv7l"
-albumentations; platform_machine != "armv7l"
-google-genai; platform_machine != "armv7l"
+# AI - Full XAI (only installs on x86_64 / AMD64 - not on Pi)
+torch; platform_machine == "x86_64" or platform_machine == "AMD64"
+torchvision; platform_machine == "x86_64" or platform_machine == "AMD64"
+grad-cam; platform_machine == "x86_64" or platform_machine == "AMD64"
+lime; platform_machine == "x86_64" or platform_machine == "AMD64"
+shap; platform_machine == "x86_64" or platform_machine == "AMD64"
+scikit-image; platform_machine == "x86_64" or platform_machine == "AMD64"
+albumentations; platform_machine == "x86_64" or platform_machine == "AMD64"
+google-genai; platform_machine == "x86_64" or platform_machine == "AMD64"
