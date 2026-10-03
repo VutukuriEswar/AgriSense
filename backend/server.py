@@ -217,10 +217,13 @@ class ExplainableDiseaseClassifier:
         onnx_path   = ROOT_DIR / 'saved_models' / 'lime_shap_gradcam.onnx'
         tflite_path = ROOT_DIR / 'saved_models' / 'lime_shap_gradcam.tflite'
 
-        self.opencv_net   = None
-        self.torch_model  = None
-        self.cam          = None
-        self.lime_explainer = None
+        self.opencv_net        = None
+        self.tflite_interp     = None
+        self.tflite_in         = None
+        self.tflite_out        = None
+        self.torch_model       = None
+        self.cam               = None
+        self.lime_explainer    = None
 
         # Auto-convert pth -> onnx if onnx missing
         if not onnx_path.exists() and pth_path.exists():
@@ -231,7 +234,7 @@ class ExplainableDiseaseClassifier:
             else:
                 logger.error("torch not available — cannot auto-convert .pth!")
 
-        # Load ONNX model using OpenCV DNN (works flawlessly on Pi!)
+        # Load ONNX model using OpenCV DNN
         if onnx_path.exists():
             try:
                 import cv2
@@ -239,6 +242,15 @@ class ExplainableDiseaseClassifier:
                 logger.info("Disease classifier loaded (OpenCV DNN).")
             except Exception as e:
                 logger.error(f"Failed to load disease ONNX model via OpenCV: {e}")
+
+        # TFLite fallback — used on Pi when OpenCV DNN is unavailable
+        if not self.opencv_net and tflite_path.exists():
+            try:
+                self.tflite_interp, self.tflite_in, self.tflite_out = \
+                    _load_tflite_interpreter(tflite_path)
+                logger.info("Disease classifier loaded (TFLite fallback).")
+            except Exception as e:
+                logger.error(f"Failed to load disease TFLite model: {e}")
 
         if pth_path.exists() and TORCH_AVAILABLE:
             try:
@@ -278,6 +290,24 @@ class ExplainableDiseaseClassifier:
         arr = preprocess_image_numpy(pil_img)
         self.opencv_net.setInput(arr)
         raw = self.opencv_net.forward()[0]
+        exp = np.exp(raw - raw.max())
+        return exp / exp.sum()
+
+    def _predict_probs_tflite(self, pil_img):
+        """Run inference via TFLite interpreter (Pi fallback)."""
+        # Detect NHWC vs NCHW from the model's declared input shape
+        shape = self.tflite_in[0]['shape']   # e.g. (1,3,224,224) or (1,224,224,3)
+        is_nhwc = (shape[-1] == 3)
+        img = pil_img.resize((IMG_SIZE, IMG_SIZE))
+        arr = np.array(img, dtype=np.float32) / 255.0
+        arr = (arr - np.array(IMAGENET_MEAN, dtype=np.float32)) \
+              /  np.array(IMAGENET_STD,  dtype=np.float32)
+        if not is_nhwc:
+            arr = arr.transpose(2, 0, 1)          # HWC -> CHW
+        arr = np.expand_dims(arr, 0)              # add batch dim
+        self.tflite_interp.set_tensor(self.tflite_in[0]['index'], arr)
+        self.tflite_interp.invoke()
+        raw = self.tflite_interp.get_tensor(self.tflite_out[0]['index'])[0]
         exp = np.exp(raw - raw.max())
         return exp / exp.sum()
 
@@ -356,13 +386,15 @@ class ExplainableDiseaseClassifier:
                     "explanations": None
                 }
 
-            if not self.opencv_net and not self.torch_model:
+            if not self.opencv_net and not self.tflite_interp and not self.torch_model:
                 raise Exception("No disease classifier model is loaded.")
 
             pil_img = Image.open(image_bytes).convert('RGB')
 
             if self.opencv_net:
                 probs = self._predict_probs_opencv(pil_img)
+            elif self.tflite_interp:
+                probs = self._predict_probs_tflite(pil_img)
             else:
                 probs = self._predict_probs_torch(pil_img)
 
