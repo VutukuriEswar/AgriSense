@@ -144,7 +144,7 @@ class PlantValidator:
             logger.error(f"Validation error: {e}")
             return False, "Error processing image."
 
-plant_validator = PlantValidator()
+
 
 class_names_path = ROOT_DIR / 'saved_models' / 'class_names.json'
 if class_names_path.exists():
@@ -163,13 +163,19 @@ else:
 
 
 def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
-    """Convert PyTorch ResNet18 .pth directly to TFLite using ai-edge-torch."""
+    """Convert PyTorch ResNet18 .pth → TFLite via temp ONNX + onnx2tf.
+    ai-edge-torch conflicts with tensorflow-cpu, so we use onnx2tf instead.
+    Produces float32 ops (FC v9/v10) compatible with tflite_runtime 2.14 on Pi.
+    """
     if not TORCH_AVAILABLE:
         logger.error("PyTorch unavailable — cannot convert .pth to .tflite.")
         return None
+    import tempfile, shutil as _shutil
+    onnx_tmp = Path(tempfile.mktemp(suffix='.onnx'))
+    tf2_dir  = Path(tempfile.mkdtemp(prefix='onnx2tf_'))
     try:
-        import ai_edge_torch
-        logger.info(f"Converting {pth_path.name} → {tflite_path.name} (ai-edge-torch) ...")
+        # Step 1: PyTorch → temp ONNX
+        logger.info(f"Converting {pth_path.name} → temp ONNX ...")
         DEVICE = torch.device("cpu")
         sd = torch.load(str(pth_path), map_location=DEVICE)
         num_classes = sd['fc.weight'].shape[0]
@@ -180,31 +186,57 @@ def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
         base_model.fc = nn.Linear(base_model.fc.in_features, num_classes)
         base_model.load_state_dict(sd)
         base_model.eval()
-        sample_inputs = (torch.zeros(1, 3, IMG_SIZE, IMG_SIZE),)
-        edge_model = ai_edge_torch.convert(base_model, sample_inputs)
-        edge_model.export(str(tflite_path))
-        logger.info(f"Conversion complete → {tflite_path.name}")
-        return num_classes
-    except ImportError:
-        logger.error("ai-edge-torch not installed. Run: pip install ai-edge-torch")
-        return None
+        dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE)
+        torch.onnx.export(
+            base_model, dummy, str(onnx_tmp),
+            input_names=["input"], output_names=["output"],
+            opset_version=18,  # 12 gets auto-upgraded to 18 by torch anyway
+        )
+        logger.info("PyTorch → ONNX done.")
+        # Step 2: temp ONNX → TFLite via onnx2tf
+        try:
+            import onnx2tf
+            logger.info(f"Converting temp ONNX → {tflite_path.name} via onnx2tf ...")
+            onnx2tf.convert(
+                input_onnx_file_path=str(onnx_tmp),
+                output_folder_path=str(tf2_dir),
+                not_use_onnxsim=True,
+                verbosity='error',
+            )
+            candidates = list(tf2_dir.glob('*.tflite'))
+            if not candidates:
+                raise FileNotFoundError("onnx2tf produced no .tflite file")
+            # onnx2tf generates float32 + float16 variants; always use float32 for Pi
+            float32_files = [c for c in candidates if 'float32' in c.name]
+            chosen = float32_files[0] if float32_files else \
+                     next((c for c in candidates if 'float16' not in c.name), candidates[0])
+            _shutil.move(str(chosen), str(tflite_path))
+            logger.info(f"Conversion complete → {tflite_path.name}")
+            return num_classes
+        except ImportError:
+            logger.error("onnx2tf not installed. Run: pip install onnx onnx2tf")
+            return None
     except Exception as e:
         logger.error(f"pth→tflite conversion failed: {e}")
         return None
+    finally:
+        onnx_tmp.unlink(missing_ok=True)
+        _shutil.rmtree(str(tf2_dir), ignore_errors=True)
 
 
 def _convert_h5_to_tflite(h5_path: Path, tflite_path: Path):
-    """Convert Keras .h5 to Pi-compatible TFLite (avoids FULLY_CONNECTED op v12).
-    Uses experimental_new_converter=False to force older MLIR path → lower op versions.
+    """Convert Keras .h5 to TFLite compatible with tflite_runtime 2.14 on Pi.
+    Plain float32 conversion — avoids FULLY_CONNECTED op v12 which was introduced
+    in TF 2.16 and is triggered by Optimize.DEFAULT. FC v9/v10 (float32) works on
+    all tflite_runtime builds.
+    NOTE: experimental_new_converter was removed in TF 2.16 and must not be set.
     """
     try:
         import tensorflow as tf
-        logger.info(f"Converting {h5_path.name} → {tflite_path.name} (Pi-compat) ...")
+        logger.info(f"Converting {h5_path.name} → {tflite_path.name} (float32, Pi-compat) ...")
         model = tf.keras.models.load_model(str(h5_path), compile=False)
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        converter.experimental_new_converter = False  # older MLIR → lower op versions, no v12
+        # No optimizations — float32 output uses FC v9/v10, not v12
         tflite_bytes = converter.convert()
         tflite_path.write_bytes(tflite_bytes)
         logger.info(f"Conversion complete → {tflite_path.name} ({len(tflite_bytes)/1e6:.1f} MB)")
@@ -215,36 +247,43 @@ def _convert_h5_to_tflite(h5_path: Path, tflite_path: Path):
 
 
 def _startup_cleanup_and_convert():
-    """Run once at startup: remove ONNX + stale TFLite files, reconvert all models."""
+    """Run once: remove ONNX + stale TFLite files, reconvert all models to Pi-compat.
+    A sentinel file (.picompat_done) prevents re-conversion on every startup.
+    Delete saved_models/.picompat_done to force a fresh reconversion.
+    """
     models_dir = ROOT_DIR / 'saved_models'
+    sentinel   = models_dir / '.picompat_done'
 
-    # --- Remove ONNX (no longer used) ---
+    # Always remove ONNX files — no longer used for inference
     for onnx_file in models_dir.glob('*.onnx'):
         onnx_file.unlink()
-        logger.info(f"Removed {onnx_file.name} (ONNX no longer used — replaced by TFLite)")
-
-    # Remove leftover backup tflite files from previous failed attempts
+        logger.info(f"Removed {onnx_file.name} (ONNX no longer used)")
     for stale in ['plant_validator_old_op.tflite', 'plant_validator_new_op.tflite']:
         p = models_dir / stale
         if p.exists():
             p.unlink()
-            logger.info(f"Removed stale file: {stale}")
+            logger.info(f"Removed stale backup: {stale}")
 
-    # --- plant_validator: delete incompatible .tflite, reconvert from .h5 ---
+    # Skip reconversion if already done — avoids slow startup on every reload
+    if sentinel.exists():
+        logger.info("TFLite models already Pi-compatible. Skipping reconversion.")
+        return
+
+    # --- plant_validator: delete op-v12 .tflite, reconvert from .h5 ---
     pv_tflite = models_dir / 'plant_validator.tflite'
     pv_h5     = models_dir / 'plant_validator.h5'
     if pv_tflite.exists():
         pv_tflite.unlink()
-        logger.info("Deleted plant_validator.tflite for reconversion (removing op v12).")
+        logger.info("Deleted plant_validator.tflite (op v12) for reconversion.")
     if pv_h5.exists():
         _convert_h5_to_tflite(pv_h5, pv_tflite)
 
-    # --- multimodal_disease: delete incompatible .tflite, reconvert from .h5 ---
+    # --- multimodal_disease: delete op-v12 .tflite, reconvert from .h5 ---
     mm_tflite = models_dir / 'multimodal_disease.tflite'
     mm_h5     = models_dir / 'multimodal_disease.h5'
     if mm_tflite.exists():
         mm_tflite.unlink()
-        logger.info("Deleted multimodal_disease.tflite for reconversion (removing op v12).")
+        logger.info("Deleted multimodal_disease.tflite (op v12) for reconversion.")
     if mm_h5.exists():
         _convert_h5_to_tflite(mm_h5, mm_tflite)
 
@@ -253,12 +292,17 @@ def _startup_cleanup_and_convert():
     dc_pth    = models_dir / 'lime_shap_gradcam.pth'
     if dc_tflite.exists():
         dc_tflite.unlink()
-        logger.info("Deleted lime_shap_gradcam.tflite for reconversion (direct pth→tflite).")
+        logger.info("Deleted lime_shap_gradcam.tflite for reconversion.")
     if dc_pth.exists() and TORCH_AVAILABLE:
         _convert_pth_to_tflite(dc_pth, dc_tflite)
 
+    # Mark all conversions done — skip on next startup
+    sentinel.write_text("pi_compat_v1")
+    logger.info("All models reconverted. Sentinel written: .picompat_done")
+
 
 _startup_cleanup_and_convert()
+plant_validator = PlantValidator()
 
 
 class ExplainableDiseaseClassifier:
