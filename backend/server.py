@@ -108,48 +108,32 @@ class PlantValidator:
         tflite_path = ROOT_DIR / 'saved_models' / 'plant_validator.tflite'
         h5_path     = ROOT_DIR / 'saved_models' / 'plant_validator.h5'
 
-        self.interpreter   = None
-        self.input_details = None
+        self.interpreter    = None
+        self.input_details  = None
         self.output_details = None
 
-        if not tflite_path.exists() and h5_path.exists():
-            logger.info("plant_validator.tflite not found — converting from .h5 ...")
-            try:
-                import tensorflow as tf
-                model = tf.keras.models.load_model(str(h5_path), compile=False)
-                converter = tf.lite.TFLiteConverter.from_keras_model(model)
-                converter.optimizations = [tf.lite.Optimize.DEFAULT]
-                with open(str(tflite_path), 'wb') as f:
-                    f.write(converter.convert())
-                logger.info("Conversion complete: plant_validator.tflite saved.")
-            except ImportError:
-                logger.error("TensorFlow not available — cannot convert .h5. Validator disabled.")
-            except Exception as e:
-                logger.error(f"Conversion error: {e}")
+        self._try_load(tflite_path, h5_path)
 
-        if tflite_path.exists():
-            try:
-                try:
-                    import tflite_runtime.interpreter as tflite
-                except ImportError:
-                    from tensorflow import lite as tflite
-                self.interpreter = tflite.Interpreter(model_path=str(tflite_path))
-                self.interpreter.allocate_tensors()
-                self.input_details  = self.interpreter.get_input_details()
-                self.output_details = self.interpreter.get_output_details()
-                logger.info("PlantValidator loaded (TFLite).")
-            except Exception as e:
-                logger.error(f"Failed to load plant_validator.tflite (likely unsupported op version on Pi). It will be disabled. Error: {e}")
-                self.interpreter = None
-        else:
-            logger.warning("No plant validator model found — all images will be accepted.")
+    def _try_load(self, tflite_path, h5_path):
+        if not tflite_path.exists():
+            logger.warning("plant_validator.tflite missing — validator disabled.")
+            return
+        try:
+            self.interpreter, self.input_details, self.output_details = \
+                _load_tflite_interpreter(tflite_path)
+            logger.info("PlantValidator loaded (TFLite).")
+        except Exception as e:
+            logger.error(f"plant_validator.tflite failed to load: {e}")
+            # The startup converter should have already produced a good file;
+            # if it still fails there's nothing more we can do at runtime.
+            self.interpreter = None
 
     def is_plant(self, image_bytes):
         if not self.interpreter:
             return True, "Validator not loaded — skipping."
         try:
-            img     = Image.open(image_bytes).convert('RGB').resize((224, 224))
-            arr     = np.expand_dims(np.array(img, dtype=np.float32) / 255.0, 0)
+            img  = Image.open(image_bytes).convert('RGB').resize((IMG_SIZE, IMG_SIZE))
+            arr  = np.expand_dims(np.array(img, dtype=np.float32) / 255.0, 0)
             self.interpreter.set_tensor(self.input_details[0]['index'], arr)
             self.interpreter.invoke()
             pred = self.interpreter.get_tensor(self.output_details[0]['index'])[0][0]
@@ -178,77 +162,130 @@ else:
     ]
 
 
-def _convert_pth_to_tflite(pth_path: Path, onnx_path: Path, tflite_path: Path):
-    num_classes = None
-    # Step 1: pth -> onnx
-    if not onnx_path.exists():
-        logger.info("Converting .pth -> .onnx ...")
+def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
+    """Convert PyTorch ResNet18 .pth directly to TFLite using ai-edge-torch."""
+    if not TORCH_AVAILABLE:
+        logger.error("PyTorch unavailable — cannot convert .pth to .tflite.")
+        return None
+    try:
+        import ai_edge_torch
+        logger.info(f"Converting {pth_path.name} → {tflite_path.name} (ai-edge-torch) ...")
+        DEVICE = torch.device("cpu")
+        sd = torch.load(str(pth_path), map_location=DEVICE)
+        num_classes = sd['fc.weight'].shape[0]
         try:
-            DEVICE = torch.device("cpu")
-            try:
-                base_model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-            except AttributeError:
-                base_model = models.resnet18(pretrained=True)
-            sd = torch.load(str(pth_path), map_location=DEVICE)
-            num_classes = sd['fc.weight'].shape[0]
-            base_model.fc = nn.Linear(base_model.fc.in_features, num_classes)
-            base_model.load_state_dict(sd)
-            base_model.eval()
-            dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE)
-            torch.onnx.export(
-                base_model, dummy, str(onnx_path),
-                input_names=["input"], output_names=["output"],
-                dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
-                opset_version=17, dynamo=False,
-            )
-            logger.info("pth -> onnx done.")
-        except Exception as e:
-            logger.error(f"pth->onnx failed: {e}")
-            return None
+            base_model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        except AttributeError:
+            base_model = models.resnet18(pretrained=False)
+        base_model.fc = nn.Linear(base_model.fc.in_features, num_classes)
+        base_model.load_state_dict(sd)
+        base_model.eval()
+        sample_inputs = (torch.zeros(1, 3, IMG_SIZE, IMG_SIZE),)
+        edge_model = ai_edge_torch.convert(base_model, sample_inputs)
+        edge_model.export(str(tflite_path))
+        logger.info(f"Conversion complete → {tflite_path.name}")
+        return num_classes
+    except ImportError:
+        logger.error("ai-edge-torch not installed. Run: pip install ai-edge-torch")
+        return None
+    except Exception as e:
+        logger.error(f"pth→tflite conversion failed: {e}")
+        return None
 
-    # We no longer convert to TFLite. We will use OpenCV DNN with the ONNX file.
-    return num_classes
+
+def _convert_h5_to_tflite(h5_path: Path, tflite_path: Path):
+    """Convert Keras .h5 to Pi-compatible TFLite (avoids FULLY_CONNECTED op v12).
+    Uses experimental_new_converter=False to force older MLIR path → lower op versions.
+    """
+    try:
+        import tensorflow as tf
+        logger.info(f"Converting {h5_path.name} → {tflite_path.name} (Pi-compat) ...")
+        model = tf.keras.models.load_model(str(h5_path), compile=False)
+        converter = tf.lite.TFLiteConverter.from_keras_model(model)
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.experimental_new_converter = False  # older MLIR → lower op versions, no v12
+        tflite_bytes = converter.convert()
+        tflite_path.write_bytes(tflite_bytes)
+        logger.info(f"Conversion complete → {tflite_path.name} ({len(tflite_bytes)/1e6:.1f} MB)")
+    except ImportError:
+        logger.error("TensorFlow unavailable — cannot convert .h5 to .tflite.")
+    except Exception as e:
+        logger.error(f"h5→tflite conversion failed: {e}")
+
+
+def _startup_cleanup_and_convert():
+    """Run once at startup: remove ONNX + stale TFLite files, reconvert all models."""
+    models_dir = ROOT_DIR / 'saved_models'
+
+    # --- Remove ONNX (no longer used) ---
+    for onnx_file in models_dir.glob('*.onnx'):
+        onnx_file.unlink()
+        logger.info(f"Removed {onnx_file.name} (ONNX no longer used — replaced by TFLite)")
+
+    # Remove leftover backup tflite files from previous failed attempts
+    for stale in ['plant_validator_old_op.tflite', 'plant_validator_new_op.tflite']:
+        p = models_dir / stale
+        if p.exists():
+            p.unlink()
+            logger.info(f"Removed stale file: {stale}")
+
+    # --- plant_validator: delete incompatible .tflite, reconvert from .h5 ---
+    pv_tflite = models_dir / 'plant_validator.tflite'
+    pv_h5     = models_dir / 'plant_validator.h5'
+    if pv_tflite.exists():
+        pv_tflite.unlink()
+        logger.info("Deleted plant_validator.tflite for reconversion (removing op v12).")
+    if pv_h5.exists():
+        _convert_h5_to_tflite(pv_h5, pv_tflite)
+
+    # --- multimodal_disease: delete incompatible .tflite, reconvert from .h5 ---
+    mm_tflite = models_dir / 'multimodal_disease.tflite'
+    mm_h5     = models_dir / 'multimodal_disease.h5'
+    if mm_tflite.exists():
+        mm_tflite.unlink()
+        logger.info("Deleted multimodal_disease.tflite for reconversion (removing op v12).")
+    if mm_h5.exists():
+        _convert_h5_to_tflite(mm_h5, mm_tflite)
+
+    # --- lime_shap_gradcam: delete old .tflite, reconvert from .pth ---
+    dc_tflite = models_dir / 'lime_shap_gradcam.tflite'
+    dc_pth    = models_dir / 'lime_shap_gradcam.pth'
+    if dc_tflite.exists():
+        dc_tflite.unlink()
+        logger.info("Deleted lime_shap_gradcam.tflite for reconversion (direct pth→tflite).")
+    if dc_pth.exists() and TORCH_AVAILABLE:
+        _convert_pth_to_tflite(dc_pth, dc_tflite)
+
+
+_startup_cleanup_and_convert()
 
 
 class ExplainableDiseaseClassifier:
     def __init__(self):
         global DISEASE_CLASSES
         pth_path    = ROOT_DIR / 'saved_models' / 'lime_shap_gradcam.pth'
-        onnx_path   = ROOT_DIR / 'saved_models' / 'lime_shap_gradcam.onnx'
         tflite_path = ROOT_DIR / 'saved_models' / 'lime_shap_gradcam.tflite'
 
-        self.opencv_net        = None
-        self.tflite_interp     = None
-        self.tflite_in         = None
-        self.tflite_out        = None
-        self.torch_model       = None
-        self.cam               = None
-        self.lime_explainer    = None
+        self.tflite_interp  = None
+        self.tflite_in      = None
+        self.tflite_out     = None
+        self.torch_model    = None
+        self.cam            = None
+        self.lime_explainer = None
 
-        # Auto-convert pth -> onnx if onnx missing
-        if not onnx_path.exists() and pth_path.exists():
-            if TORCH_AVAILABLE:
-                num_cls = _convert_pth_to_tflite(pth_path, onnx_path, tflite_path)
-                if num_cls and num_cls != len(DISEASE_CLASSES):
-                    DISEASE_CLASSES = [f"Class_{i}" for i in range(num_cls)]
-            else:
-                logger.error("torch not available — cannot auto-convert .pth!")
+        # Primary: load TFLite (converted by _startup_cleanup_and_convert)
+        # If missing for some reason, attempt conversion now
+        if not tflite_path.exists() and pth_path.exists() and TORCH_AVAILABLE:
+            num_cls = _convert_pth_to_tflite(pth_path, tflite_path)
+            if num_cls and num_cls != len(DISEASE_CLASSES):
+                DISEASE_CLASSES = [f"Class_{i}" for i in range(num_cls)]
 
-        # Load ONNX model using OpenCV DNN
-        if onnx_path.exists():
-            try:
-                import cv2
-                self.opencv_net = cv2.dnn.readNetFromONNX(str(onnx_path))
-                logger.info("Disease classifier loaded (OpenCV DNN).")
-            except Exception as e:
-                logger.error(f"Failed to load disease ONNX model via OpenCV: {e}")
-
-        # TFLite fallback — used on Pi when OpenCV DNN is unavailable
-        if not self.opencv_net and tflite_path.exists():
+        if tflite_path.exists():
             try:
                 self.tflite_interp, self.tflite_in, self.tflite_out = \
                     _load_tflite_interpreter(tflite_path)
-                logger.info("Disease classifier loaded (TFLite fallback).")
+                logger.info("Disease classifier loaded (TFLite).")
             except Exception as e:
                 logger.error(f"Failed to load disease TFLite model: {e}")
 
@@ -285,13 +322,6 @@ class ExplainableDiseaseClassifier:
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
         return transform(pil_img)
-
-    def _predict_probs_opencv(self, pil_img):
-        arr = preprocess_image_numpy(pil_img)
-        self.opencv_net.setInput(arr)
-        raw = self.opencv_net.forward()[0]
-        exp = np.exp(raw - raw.max())
-        return exp / exp.sum()
 
     def _predict_probs_tflite(self, pil_img):
         """Run inference via TFLite interpreter (Pi fallback)."""
@@ -386,14 +416,12 @@ class ExplainableDiseaseClassifier:
                     "explanations": None
                 }
 
-            if not self.opencv_net and not self.tflite_interp and not self.torch_model:
+            if not self.tflite_interp and not self.torch_model:
                 raise Exception("No disease classifier model is loaded.")
 
             pil_img = Image.open(image_bytes).convert('RGB')
 
-            if self.opencv_net:
-                probs = self._predict_probs_opencv(pil_img)
-            elif self.tflite_interp:
+            if self.tflite_interp:
                 probs = self._predict_probs_tflite(pil_img)
             else:
                 probs = self._predict_probs_torch(pil_img)
