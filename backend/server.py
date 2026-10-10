@@ -414,13 +414,20 @@ class ExplainableDiseaseClassifier:
 
     @staticmethod
     def _upscale_scores(scores, size=224):
-        import cv2
         try:
+            import cv2
             up = cv2.resize(scores, (size, size), interpolation=cv2.INTER_CUBIC)
         except Exception:
-            up = np.kron(scores, np.ones((size // scores.shape[0], size // scores.shape[1]), dtype=np.float32))
-            up = up[:size, :size]
-        return up.astype(np.float32)
+            try:
+                from PIL import Image as _PILImage
+                up = np.array(
+                    _PILImage.fromarray(scores).resize((size, size), _PILImage.BICUBIC),
+                    dtype=np.float32,
+                )
+            except Exception:
+                up = np.kron(scores, np.ones((size // scores.shape[0], size // scores.shape[1]), dtype=np.float32))
+                up = up[:size, :size]
+        return np.asarray(up, dtype=np.float32)
 
     def _fallback_gradcam(self, raw_uint8, scores):
         up = self._upscale_scores(scores)
@@ -430,7 +437,7 @@ class ExplainableDiseaseClassifier:
             import cv2
             heat = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
             heat = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        except ImportError:
+        except Exception:
             cmap = plt.get_cmap('jet')
             heat = cmap(norm)[..., :3]
         base = raw_uint8.astype(np.float32) / 255.0
@@ -445,7 +452,7 @@ class ExplainableDiseaseClassifier:
             import cv2
             edges = cv2.Canny(mask, 50, 150)
             ys, xs = np.where(edges > 0)
-        except ImportError:
+        except Exception:
             dy = np.abs(np.diff(mask.astype(np.int16), axis=0, prepend=0)) > 0
             dx = np.abs(np.diff(mask.astype(np.int16), axis=1, prepend=0)) > 0
             ys, xs = np.where(dy | dx)
