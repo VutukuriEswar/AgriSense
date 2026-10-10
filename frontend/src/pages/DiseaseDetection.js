@@ -8,6 +8,16 @@ import { toast } from 'sonner';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
+const getGo2rtcBase = () => {
+  if (process.env.REACT_APP_GO2RTC_URL) return process.env.REACT_APP_GO2RTC_URL;
+  try {
+    const u = new URL(BACKEND_URL);
+    return `${u.protocol}//${u.hostname}:1984`;
+  } catch {
+    return "http://localhost:1984";
+  }
+};
+const GO2RTC_BASE = getGo2rtcBase();
 
 const DiseaseDetection = () => {
   const [image, setImage] = useState(null);
@@ -15,15 +25,19 @@ const DiseaseDetection = () => {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [useCamera, setUseCamera] = useState(false);
+  const [phoneLive, setPhoneLive] = useState(false);
+  const [phoneSrc] = useState("phone");
+  const [capturingPhone, setCapturingPhone] = useState(false);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
   useEffect(() => {
-    return () => stopCamera();
+    return () => { stopCamera(); setPhoneLive(false); };
   }, []);
 
   const startCamera = async () => {
     try {
+      setPhoneLive(false);
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
       setUseCamera(true);
       setPreview(null);
@@ -54,13 +68,57 @@ const DiseaseDetection = () => {
       canvasRef.current.width = videoRef.current.videoWidth;
       canvasRef.current.height = videoRef.current.videoHeight;
       context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
-      
+
       canvasRef.current.toBlob((blob) => {
         const file = new File([blob], "capture.jpg", { type: "image/jpeg" });
         setImage(file);
         setPreview(URL.createObjectURL(file));
         stopCamera();
       }, 'image/jpeg');
+    }
+  };
+
+  const startPhoneLive = () => {
+    stopCamera();
+    setPreview(null);
+    setImage(null);
+    setResult(null);
+    setPhoneLive(true);
+  };
+
+  const stopPhoneLive = () => {
+    setPhoneLive(false);
+  };
+
+  const capturePhonePhoto = async () => {
+    setCapturingPhone(true);
+    try {
+      const res = await axios.get(`${API}/cam/snapshot`, {
+        params: { src: phoneSrc },
+        responseType: 'blob',
+        timeout: 15000,
+      });
+      const blob = res.data;
+      if (!blob || blob.size < 5 * 1024) {
+        throw new Error("empty frame");
+      }
+      const file = new File([blob], "phonecam.jpg", { type: "image/jpeg" });
+      if (preview) URL.revokeObjectURL(preview);
+      setImage(file);
+      setPreview(URL.createObjectURL(file));
+      setResult(null);
+      setPhoneLive(false);
+      toast.success("Photo captured. Click Detect Disease.");
+    } catch (error) {
+      console.error(error);
+      const status = error?.response?.status;
+      if (status === 502) {
+        toast.error("Phone offline. Check IP Webcam 'Start server' + go2rtc running.");
+      } else {
+        toast.error("Capture failed. Check go2rtc :1984 is running.");
+      }
+    } finally {
+      setCapturingPhone(false);
     }
   };
 
@@ -86,7 +144,8 @@ const DiseaseDetection = () => {
     setResult(null);
     try {
       const res = await axios.post(`${API}/predict/disease`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 180000,
       });
       setResult(res.data);
 
@@ -128,9 +187,39 @@ const DiseaseDetection = () => {
             <CardTitle className="text-green-900">Upload Sample</CardTitle>
           </CardHeader>
           <CardContent>
-            {!useCamera ? (
+            {useCamera ? (
+              <div className="border-2 border-solid border-green-300 rounded-lg p-0 text-center bg-black relative min-h-[300px] flex flex-col items-center justify-center overflow-hidden">
+                <video ref={videoRef} autoPlay playsInline className="w-full h-full max-h-[350px] object-cover" />
+                <canvas ref={canvasRef} className="hidden" />
+
+                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 px-4">
+                  <Button onClick={stopCamera} variant="destructive" size="sm" className="rounded-full shadow-lg border border-white/20">
+                    Cancel
+                  </Button>
+                  <Button onClick={capturePhoto} className="bg-white text-green-700 hover:bg-gray-100 font-bold rounded-full shadow-lg px-6 border border-white/20">
+                    <Camera className="w-4 h-4 mr-2" /> Capture
+                  </Button>
+                </div>
+              </div>
+            ) : phoneLive ? (
+              <div className="border-2 border-solid border-green-300 rounded-lg p-0 text-center bg-black relative min-h-[300px] flex flex-col items-center justify-center overflow-hidden">
+                <img
+                  src={`${GO2RTC_BASE}/api/stream.mjpeg?src=${phoneSrc}`}
+                  alt="Phone live"
+                  className="w-full h-full max-h-[350px] object-contain bg-black"
+                />
+                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 px-4">
+                  <Button onClick={stopPhoneLive} variant="destructive" size="sm" className="rounded-full shadow-lg border border-white/20">
+                    Cancel
+                  </Button>
+                  <Button onClick={capturePhonePhoto} disabled={capturingPhone} className="bg-white text-green-700 hover:bg-gray-100 font-bold rounded-full shadow-lg px-6 border border-white/20">
+                    {capturingPhone ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Capturing...</> : <><Camera className="w-4 h-4 mr-2" /> Capture</>}
+                  </Button>
+                </div>
+              </div>
+            ) : (
               <div className="border-2 border-dashed border-green-200 rounded-lg p-8 text-center hover:border-green-400 transition relative min-h-[300px] flex flex-col items-center justify-center">
-                
+
                 {preview ? (
                   <div className="relative w-full">
                     <img src={preview} alt="Preview" className="max-h-64 mx-auto rounded-lg object-contain shadow-md mb-4" />
@@ -148,7 +237,7 @@ const DiseaseDetection = () => {
                     </div>
                   </div>
                 )}
-                
+
                 {!preview && (
                   <>
                     <div className="flex items-center w-full my-4 z-20">
@@ -156,25 +245,17 @@ const DiseaseDetection = () => {
                       <span className="px-3 text-gray-400 text-sm">OR</span>
                       <div className="flex-1 border-t border-gray-200"></div>
                     </div>
-                    <Button onClick={startCamera} type="button" variant="outline" className="w-full border-green-300 text-green-700 hover:bg-green-50 z-20">
-                      <Camera className="w-4 h-4 mr-2" /> Use Camera
-                    </Button>
+                    <div className="flex flex-col gap-2 w-full z-20">
+                      <Button onClick={startCamera} type="button" variant="outline" className="w-full border-green-300 text-green-700 hover:bg-green-50">
+                        <Camera className="w-4 h-4 mr-2" /> Use Camera
+                      </Button>
+                      <Button onClick={startPhoneLive} type="button" variant="outline" className="w-full border-green-300 text-green-700 hover:bg-green-50">
+                        <Camera className="w-4 h-4 mr-2" /> Use PhoneCam (go2rtc)
+                      </Button>
+                      <p className="text-xs text-gray-400">Phone: IP Webcam app → Start server, go2rtc running on :1984</p>
+                    </div>
                   </>
                 )}
-              </div>
-            ) : (
-              <div className="border-2 border-solid border-green-300 rounded-lg p-0 text-center bg-black relative min-h-[300px] flex flex-col items-center justify-center overflow-hidden">
-                <video ref={videoRef} autoPlay playsInline className="w-full h-full max-h-[350px] object-cover" />
-                <canvas ref={canvasRef} className="hidden" />
-                
-                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 px-4">
-                  <Button onClick={stopCamera} variant="destructive" size="sm" className="rounded-full shadow-lg border border-white/20">
-                    Cancel
-                  </Button>
-                  <Button onClick={capturePhoto} className="bg-white text-green-700 hover:bg-gray-100 font-bold rounded-full shadow-lg px-6 border border-white/20">
-                    <Camera className="w-4 h-4 mr-2" /> Capture
-                  </Button>
-                </div>
               </div>
             )}
 
@@ -243,7 +324,7 @@ const DiseaseDetection = () => {
         <div className="mt-8">
           <h2 className="text-2xl font-bold text-green-900 mb-6">AI Explainability (XAI)</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-            
+
             <Card className="border-gray-200 shadow-sm">
               <CardHeader className="pb-2">
                 <CardTitle className="text-md text-gray-800">Original Scan</CardTitle>
@@ -265,7 +346,7 @@ const DiseaseDetection = () => {
                     <p className="text-sm text-gray-500 mt-3">Red areas highlight exactly where the model looked to make its prediction.</p>
                   </>
                 ) : (
-                   <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
+                  <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
                 )}
               </CardContent>
             </Card>
@@ -281,7 +362,7 @@ const DiseaseDetection = () => {
                     <p className="text-sm text-gray-500 mt-3">Highlights the image regions (superpixels) that most strongly supported the prediction.</p>
                   </>
                 ) : (
-                   <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
+                  <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
                 )}
               </CardContent>
             </Card>
@@ -297,7 +378,7 @@ const DiseaseDetection = () => {
                     <p className="text-sm text-gray-500 mt-3">Red pixels push the model towards the disease diagnosis; blue pushes it away.</p>
                   </>
                 ) : (
-                   <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
+                  <div className="flex items-center justify-center h-48 bg-gray-50 rounded-lg border text-gray-400 text-sm">Failed to generate</div>
                 )}
               </CardContent>
             </Card>

@@ -7,7 +7,8 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Query
+from fastapi.responses import Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -124,8 +125,6 @@ class PlantValidator:
             logger.info("PlantValidator loaded (TFLite).")
         except Exception as e:
             logger.error(f"plant_validator.tflite failed to load: {e}")
-            # The startup converter should have already produced a good file;
-            # if it still fails there's nothing more we can do at runtime.
             self.interpreter = None
 
     def is_plant(self, image_bytes):
@@ -163,10 +162,6 @@ else:
 
 
 def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
-    """Convert PyTorch ResNet18 .pth → TFLite via temp ONNX + onnx2tf.
-    ai-edge-torch conflicts with tensorflow-cpu, so we use onnx2tf instead.
-    Produces float32 ops (FC v9/v10) compatible with tflite_runtime 2.14 on Pi.
-    """
     if not TORCH_AVAILABLE:
         logger.error("PyTorch unavailable — cannot convert .pth to .tflite.")
         return None
@@ -174,7 +169,6 @@ def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
     onnx_tmp = Path(tempfile.mktemp(suffix='.onnx'))
     tf2_dir  = Path(tempfile.mkdtemp(prefix='onnx2tf_'))
     try:
-        # Step 1: PyTorch → temp ONNX
         logger.info(f"Converting {pth_path.name} → temp ONNX ...")
         DEVICE = torch.device("cpu")
         sd = torch.load(str(pth_path), map_location=DEVICE)
@@ -190,10 +184,9 @@ def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
         torch.onnx.export(
             base_model, dummy, str(onnx_tmp),
             input_names=["input"], output_names=["output"],
-            opset_version=18,  # 12 gets auto-upgraded to 18 by torch anyway
+            opset_version=18,
         )
         logger.info("PyTorch → ONNX done.")
-        # Step 2: temp ONNX → TFLite via onnx2tf
         try:
             import onnx2tf
             logger.info(f"Converting temp ONNX → {tflite_path.name} via onnx2tf ...")
@@ -206,7 +199,6 @@ def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
             candidates = list(tf2_dir.glob('*.tflite'))
             if not candidates:
                 raise FileNotFoundError("onnx2tf produced no .tflite file")
-            # onnx2tf generates float32 + float16 variants; always use float32 for Pi
             float32_files = [c for c in candidates if 'float32' in c.name]
             chosen = float32_files[0] if float32_files else \
                      next((c for c in candidates if 'float16' not in c.name), candidates[0])
@@ -225,18 +217,11 @@ def _convert_pth_to_tflite(pth_path: Path, tflite_path: Path):
 
 
 def _convert_h5_to_tflite(h5_path: Path, tflite_path: Path):
-    """Convert Keras .h5 to TFLite compatible with tflite_runtime 2.14 on Pi.
-    Plain float32 conversion — avoids FULLY_CONNECTED op v12 which was introduced
-    in TF 2.16 and is triggered by Optimize.DEFAULT. FC v9/v10 (float32) works on
-    all tflite_runtime builds.
-    NOTE: experimental_new_converter was removed in TF 2.16 and must not be set.
-    """
     try:
         import tensorflow as tf
         logger.info(f"Converting {h5_path.name} → {tflite_path.name} (float32, Pi-compat) ...")
         model = tf.keras.models.load_model(str(h5_path), compile=False)
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        # No optimizations — float32 output uses FC v9/v10, not v12
         tflite_bytes = converter.convert()
         tflite_path.write_bytes(tflite_bytes)
         logger.info(f"Conversion complete → {tflite_path.name} ({len(tflite_bytes)/1e6:.1f} MB)")
@@ -247,14 +232,9 @@ def _convert_h5_to_tflite(h5_path: Path, tflite_path: Path):
 
 
 def _startup_cleanup_and_convert():
-    """Run once: remove ONNX + stale TFLite files, reconvert all models to Pi-compat.
-    A sentinel file (.picompat_done) prevents re-conversion on every startup.
-    Delete saved_models/.picompat_done to force a fresh reconversion.
-    """
     models_dir = ROOT_DIR / 'saved_models'
     sentinel   = models_dir / '.picompat_done'
 
-    # Always remove ONNX files — no longer used for inference
     for onnx_file in models_dir.glob('*.onnx'):
         onnx_file.unlink()
         logger.info(f"Removed {onnx_file.name} (ONNX no longer used)")
@@ -264,12 +244,10 @@ def _startup_cleanup_and_convert():
             p.unlink()
             logger.info(f"Removed stale backup: {stale}")
 
-    # Skip reconversion if already done — avoids slow startup on every reload
     if sentinel.exists():
         logger.info("TFLite models already Pi-compatible. Skipping reconversion.")
         return
 
-    # --- plant_validator: delete op-v12 .tflite, reconvert from .h5 ---
     pv_tflite = models_dir / 'plant_validator.tflite'
     pv_h5     = models_dir / 'plant_validator.h5'
     if pv_tflite.exists():
@@ -278,7 +256,6 @@ def _startup_cleanup_and_convert():
     if pv_h5.exists():
         _convert_h5_to_tflite(pv_h5, pv_tflite)
 
-    # --- multimodal_disease: delete op-v12 .tflite, reconvert from .h5 ---
     mm_tflite = models_dir / 'multimodal_disease.tflite'
     mm_h5     = models_dir / 'multimodal_disease.h5'
     if mm_tflite.exists():
@@ -287,7 +264,6 @@ def _startup_cleanup_and_convert():
     if mm_h5.exists():
         _convert_h5_to_tflite(mm_h5, mm_tflite)
 
-    # --- lime_shap_gradcam: delete old .tflite, reconvert from .pth ---
     dc_tflite = models_dir / 'lime_shap_gradcam.tflite'
     dc_pth    = models_dir / 'lime_shap_gradcam.pth'
     if dc_tflite.exists():
@@ -296,7 +272,6 @@ def _startup_cleanup_and_convert():
     if dc_pth.exists() and TORCH_AVAILABLE:
         _convert_pth_to_tflite(dc_pth, dc_tflite)
 
-    # Mark all conversions done — skip on next startup
     sentinel.write_text("pi_compat_v1")
     logger.info("All models reconverted. Sentinel written: .picompat_done")
 
@@ -318,8 +293,6 @@ class ExplainableDiseaseClassifier:
         self.cam            = None
         self.lime_explainer = None
 
-        # Primary: load TFLite (converted by _startup_cleanup_and_convert)
-        # If missing for some reason, attempt conversion now
         if not tflite_path.exists() and pth_path.exists() and TORCH_AVAILABLE:
             num_cls = _convert_pth_to_tflite(pth_path, tflite_path)
             if num_cls and num_cls != len(DISEASE_CLASSES):
@@ -368,17 +341,15 @@ class ExplainableDiseaseClassifier:
         return transform(pil_img)
 
     def _predict_probs_tflite(self, pil_img):
-        """Run inference via TFLite interpreter (Pi fallback)."""
-        # Detect NHWC vs NCHW from the model's declared input shape
-        shape = self.tflite_in[0]['shape']   # e.g. (1,3,224,224) or (1,224,224,3)
+        shape = self.tflite_in[0]['shape']
         is_nhwc = (shape[-1] == 3)
         img = pil_img.resize((IMG_SIZE, IMG_SIZE))
         arr = np.array(img, dtype=np.float32) / 255.0
         arr = (arr - np.array(IMAGENET_MEAN, dtype=np.float32)) \
               /  np.array(IMAGENET_STD,  dtype=np.float32)
         if not is_nhwc:
-            arr = arr.transpose(2, 0, 1)          # HWC -> CHW
-        arr = np.expand_dims(arr, 0)              # add batch dim
+            arr = arr.transpose(2, 0, 1)
+        arr = np.expand_dims(arr, 0)
         self.tflite_interp.set_tensor(self.tflite_in[0]['index'], arr)
         self.tflite_interp.invoke()
         raw = self.tflite_interp.get_tensor(self.tflite_out[0]['index'])[0]
@@ -399,7 +370,6 @@ class ExplainableDiseaseClassifier:
             return F.softmax(self.torch_model(batch), dim=1).cpu().numpy()
 
     def _predict_fn_lime_tflite(self, images_np):
-        """Fallback for LIME/SHAP on Pi using TFLite loop."""
         results = []
         for img_np in images_np:
             pil_img = Image.fromarray(img_np.astype(np.uint8))
@@ -415,11 +385,9 @@ class ExplainableDiseaseClassifier:
         raw_uint8 = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE)))
         result = {"gradcam": None, "lime": None, "shap": None}
         
-        # Determine which prediction function to use based on PyTorch availability
         use_torch = self.torch_model is not None
         predict_fn = self._predict_fn_lime if use_torch else self._predict_fn_lime_tflite
 
-        # 1. Grad-CAM (Requires PyTorch gradients - impossible on TFLite)
         if use_torch:
             try:
                 input_t = self._torch_transform(pil_img).unsqueeze(0).to(self.DEVICE)
@@ -430,13 +398,10 @@ class ExplainableDiseaseClassifier:
             except Exception as e:
                 logger.error(f"GradCAM error: {e}")
 
-        # 2. LIME (Model agnostic - works on both)
         try:
-            # We import locally so Pi doesn't crash if it's missing the package
             from lime import lime_image
             from skimage.segmentation import mark_boundaries
             
-            # Use smaller num_samples on TFLite to prevent Pi from timing out (100 vs 200)
             samples = 200 if use_torch else 100
             
             explainer = lime_image.LimeImageExplainer()
@@ -452,11 +417,9 @@ class ExplainableDiseaseClassifier:
         except Exception as e:
             logger.error(f"LIME error: {e}")
 
-        # 3. SHAP (Model agnostic - works on both)
         try:
             import shap
-            
-            # Use small evals and batch=1 on TFLite to avoid Pi freezing
+
             evals = 100 if use_torch else 50
             batch = 10 if use_torch else 1
             
@@ -549,6 +512,44 @@ async def root():
 @api_router.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "AgriSense"}
+
+
+GO2RTC_BASE_URL = os.environ.get('GO2RTC_BASE_URL', 'http://127.0.0.1:1984')
+GO2RTC_DEFAULT_SRC = os.environ.get('GO2RTC_SRC', 'phone')
+
+
+@api_router.get("/cam/snapshot")
+async def cam_snapshot(src: str = Query(default="phone")):
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+
+    stream = (src or GO2RTC_DEFAULT_SRC).strip() or GO2RTC_DEFAULT_SRC
+    target = f"{GO2RTC_BASE_URL.rstrip('/')}/api/frame.jpeg?src={urllib.parse.quote(stream)}&cache=1s"
+    try:
+        req = urllib.request.Request(target, headers={'User-Agent': 'AgriSense/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            content_type = resp.headers.get('Content-Type', 'image/jpeg')
+            data = resp.read()
+    except urllib.error.HTTPError as e:
+        logger.error(f"cam/snapshot go2rtc HTTP {e.code} for src={stream}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Phone camera unreachable. Check IP Webcam 'Start server' + go2rtc.yaml IP + go2rtc running."
+        )
+    except Exception as e:
+        logger.error(f"cam/snapshot failed src={stream} target={target}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Phone camera unreachable. Check IP Webcam 'Start server' + go2rtc.yaml IP + go2rtc running."
+        )
+    if len(data) < 5 * 1024 or not data.startswith(b'\xff\xd8'):
+        logger.error(f"cam/snapshot got {len(data)} bytes for src={stream} (not a JPEG)")
+        raise HTTPException(
+            status_code=502,
+            detail="Phone camera returned no image. Re-tap 'Start server' in IP Webcam."
+        )
+    return Response(content=data, media_type='image/jpeg')
 
 
 class DiseaseResult(BaseModel):
