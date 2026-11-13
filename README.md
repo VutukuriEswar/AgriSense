@@ -74,6 +74,15 @@ yarn install
 yarn start
 ```
 
+8. **Download & Run go2rtc (Incase of running on Raspberry Pi & Camera Module is not available)**
+```bash
+mkdir -p ~/go2rtc
+cd ~/go2rtc
+wget https://github.com/AlexxIT/go2rtc/releases/latest/download/go2rtc_linux_arm -O go2rtc
+chmod +x go2rtc
+./go2rtc -config go2rtc.yaml
+```
+
 ## API Endpoints
 
 **Prediction:**
