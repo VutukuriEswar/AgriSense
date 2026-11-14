@@ -4,6 +4,8 @@ import sys
 import json
 import base64
 import logging
+import warnings
+import contextlib
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -407,8 +409,7 @@ class ExplainableDiseaseClassifier:
                 try:
                     p = self._predict_single_pil(Image.fromarray(occ))
                     scores[gy, gx] = base_conf - float(p[pred_idx])
-                except Exception as e:
-                    logger.error(f"Occlusion cell ({gy},{gx}) failed: {e}")
+                except Exception:
                     scores[gy, gx] = 0.0
         return scores, raw_uint8
 
@@ -470,97 +471,94 @@ class ExplainableDiseaseClassifier:
         return fig_to_base64(fig)
 
     def _generate_xai(self, pil_img, pred_idx):
-        raw_uint8 = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE)))
-        result = {"gradcam": None, "lime": None, "shap": None}
+        with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            warnings.simplefilter("ignore")
 
-        use_torch = self.torch_model is not None
-        predict_fn = self._predict_fn_lime if use_torch else self._predict_fn_lime_tflite
-        has_predictor = self.tflite_interp is not None or self.torch_model is not None
-        _occ_cache = {}
+            raw_uint8 = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE)))
+            result = {"gradcam": None, "lime": None, "shap": None}
 
-        def _occ():
-            if "scores" not in _occ_cache:
-                _occ_cache["scores"], _occ_cache["raw"] = self._occlusion_scores(pil_img, pred_idx, grid=7)
-            return _occ_cache["scores"], _occ_cache["raw"]
+            use_torch = self.torch_model is not None
+            predict_fn = self._predict_fn_lime if use_torch else self._predict_fn_lime_tflite
+            has_predictor = self.tflite_interp is not None or self.torch_model is not None
+            _occ_cache = {}
 
-        def _fallback_all(reason):
-            if not has_predictor:
-                logger.error(f"Occlusion fallback unavailable (no model): {reason}")
-                return
-            try:
-                scores, raw = _occ()
-                if result["gradcam"] is None:
-                    result["gradcam"] = self._fallback_gradcam(raw, scores)
-                if result["lime"] is None:
-                    result["lime"] = self._fallback_lime(raw, scores)
-                if result["shap"] is None:
-                    result["shap"] = self._fallback_shap(raw, scores)
-                logger.info(f"XAI occlusion fallback used ({reason})")
-            except Exception as e:
-                logger.error(f"Occlusion fallback failed: {e}")
+            def _occ():
+                if "scores" not in _occ_cache:
+                    _occ_cache["scores"], _occ_cache["raw"] = self._occlusion_scores(pil_img, pred_idx, grid=7)
+                return _occ_cache["scores"], _occ_cache["raw"]
 
-        if use_torch and USE_TRUE_XAI:
-            try:
-                input_t = self._torch_transform(pil_img).unsqueeze(0).to(self.DEVICE)
-                with torch.enable_grad():
-                    gc = self.cam(input_tensor=input_t, targets=[ClassifierOutputTarget(pred_idx)])[0]
-                cam_vis = show_cam_on_image(self._denormalize(input_t.squeeze(0)), gc, use_rgb=True)
-                result["gradcam"] = image_to_base64(cam_vis / 255.0)
-            except Exception as e:
-                logger.error(f"GradCAM error: {e}")
-        if result["gradcam"] is None:
-            _fallback_all("gradcam" if not use_torch else "gradcam-error")
+            def _fallback_all(reason):
+                if not has_predictor:
+                    return
+                try:
+                    scores, raw = _occ()
+                    if result["gradcam"] is None:
+                        result["gradcam"] = self._fallback_gradcam(raw, scores)
+                    if result["lime"] is None:
+                        result["lime"] = self._fallback_lime(raw, scores)
+                    if result["shap"] is None:
+                        result["shap"] = self._fallback_shap(raw, scores)
+                except Exception:
+                    pass
 
-        if USE_TRUE_XAI:
-            try:
-                from lime import lime_image
-                from skimage.segmentation import mark_boundaries
+            if use_torch and USE_TRUE_XAI:
+                try:
+                    input_t = self._torch_transform(pil_img).unsqueeze(0).to(self.DEVICE)
+                    with torch.enable_grad():
+                        gc = self.cam(input_tensor=input_t, targets=[ClassifierOutputTarget(pred_idx)])[0]
+                    cam_vis = show_cam_on_image(self._denormalize(input_t.squeeze(0)), gc, use_rgb=True)
+                    result["gradcam"] = image_to_base64(cam_vis / 255.0)
+                except Exception:
+                    pass
+            if result["gradcam"] is None:
+                _fallback_all("gradcam" if not use_torch else "gradcam-error")
 
-                samples = 200 if use_torch else 35
+            if USE_TRUE_XAI:
+                try:
+                    from lime import lime_image
+                    from skimage.segmentation import mark_boundaries
 
-                explainer = lime_image.LimeImageExplainer()
-                exp = explainer.explain_instance(
-                    raw_uint8, predict_fn,
-                    labels=(pred_idx,), top_labels=None,
-                    hide_color=0, num_samples=samples
-                )
-                lt, lm = exp.get_image_and_mask(pred_idx, positive_only=True, num_features=6, hide_rest=False)
-                result["lime"] = image_to_base64(mark_boundaries(lt / 255.0, lm))
-            except ImportError:
-                logger.warning("LIME skipped: 'lime' or 'skimage' not installed → occlusion fallback.")
-            except Exception as e:
-                logger.error(f"LIME error: {e} → occlusion fallback.")
-        if result["lime"] is None:
-            _fallback_all("lime")
+                    samples = 200 if use_torch else 35
 
-        if USE_TRUE_XAI:
-            try:
-                import shap
+                    explainer = lime_image.LimeImageExplainer()
+                    exp = explainer.explain_instance(
+                        raw_uint8, predict_fn,
+                        labels=(pred_idx,), top_labels=None,
+                        hide_color=0, num_samples=samples
+                    )
+                    lt, lm = exp.get_image_and_mask(pred_idx, positive_only=True, num_features=6, hide_rest=False)
+                    result["lime"] = image_to_base64(mark_boundaries(lt / 255.0, lm))
+                except Exception:
+                    pass
+            if result["lime"] is None:
+                _fallback_all("lime")
 
-                evals = 100 if use_torch else 25
-                batch = 10 if use_torch else 1
+            if USE_TRUE_XAI:
+                try:
+                    import shap
 
-                masker = shap.maskers.Image("blur(64,64)", (IMG_SIZE, IMG_SIZE, 3))
-                explainer = shap.Explainer(predict_fn, masker, output_names=DISEASE_CLASSES)
-                sv = explainer(np.expand_dims(raw_uint8, 0), max_evals=evals, batch_size=batch, outputs=[pred_idx])
-                arr = sv.values[0]
-                if arr.ndim == 4:
-                    arr = arr[..., 0]
-                hm = arr.sum(axis=-1)
-                amax = np.abs(hm).max() or 1e-8
-                fig, ax = plt.subplots(figsize=(4, 4))
-                ax.imshow(raw_uint8)
-                ax.imshow(hm, cmap="bwr", alpha=0.6, vmin=-amax, vmax=amax)
-                ax.axis("off")
-                result["shap"] = fig_to_base64(fig)
-            except ImportError:
-                logger.warning("SHAP skipped: 'shap' not installed → occlusion fallback.")
-            except Exception as e:
-                logger.error(f"SHAP error: {e} → occlusion fallback.")
-        if result["shap"] is None:
-            _fallback_all("shap")
+                    evals = 100 if use_torch else 25
+                    batch = 10 if use_torch else 1
 
-        return result
+                    masker = shap.maskers.Image("blur(64,64)", (IMG_SIZE, IMG_SIZE, 3))
+                    explainer = shap.Explainer(predict_fn, masker, output_names=DISEASE_CLASSES)
+                    sv = explainer(np.expand_dims(raw_uint8, 0), max_evals=evals, batch_size=batch, outputs=[pred_idx], silent=True)
+                    arr = sv.values[0]
+                    if arr.ndim == 4:
+                        arr = arr[..., 0]
+                    hm = arr.sum(axis=-1)
+                    amax = np.abs(hm).max() or 1e-8
+                    fig, ax = plt.subplots(figsize=(4, 4))
+                    ax.imshow(raw_uint8)
+                    ax.imshow(hm, cmap="bwr", alpha=0.6, vmin=-amax, vmax=amax)
+                    ax.axis("off")
+                    result["shap"] = fig_to_base64(fig)
+                except Exception:
+                    pass
+            if result["shap"] is None:
+                _fallback_all("shap")
+
+            return result
 
     def predict(self, image_bytes):
         try:
